@@ -78,6 +78,3 @@ The LSTM model achieves:
 
 **Ayebawanaemi Geraldine Winston**
 
-## License
-
-This project is licensed under the **MIT License**.
