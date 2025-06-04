@@ -1,0 +1,144 @@
+import pandas as pd
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error, r2_score
+
+# Custom Dataset
+class WellLogDataset(Dataset):
+    def __init__(self, X, y):
+        self.X = torch.tensor(X, dtype=torch.float32)
+        self.y = torch.tensor(y, dtype=torch.float32)
+    
+    def __len__(self):
+        return len(self.X)
+    
+    def __getitem__(self, idx):
+        return self.X[idx], self.y[idx]
+
+# LSTM Model
+class LSTMModel(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers, output_size):
+        super(LSTMModel, self).__init__()
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_size, output_size)
+    
+    def forward(self, x):
+        h_0 = torch.zeros(self.lstm.num_layers, x.size(0), self.lstm.hidden_size).to(x.device)
+        c_0 = torch.zeros(self.lstm.num_layers, x.size(0), self.lstm.hidden_size).to(x.device)
+        out, _ = self.lstm(x, (h_0, c_0))
+        out = self.fc(out[:, -1, :])
+        return out
+
+# Load Data (simulated well log data for demonstration)
+def generate_synthetic_well_log_data(n_samples=1000, seq_length=10):
+    np.random.seed(42)
+    depth = np.linspace(1000, 3000, n_samples)
+    gamma_ray = np.random.uniform(50, 150, n_samples)
+    resistivity = np.random.uniform(0.2, 200, n_samples)
+    density = np.random.uniform(2, 3, n_samples)
+    neutron_porosity = np.random.uniform(0.1, 0.35, n_samples)
+    
+    # Target property: Porosity (synthetic)
+    porosity = 0.5 - 0.001 * (gamma_ray) + 0.002 * (resistivity) + np.random.normal(0, 0.02, n_samples)
+
+    df = pd.DataFrame({
+        'Depth': depth,
+        'GammaRay': gamma_ray,
+        'Resistivity': resistivity,
+        'Density': density,
+        'NeutronPorosity': neutron_porosity,
+        'Porosity': porosity
+    })
+
+    return df
+
+# Parameters
+SEQ_LENGTH = 10
+BATCH_SIZE = 32
+EPOCHS = 30
+HIDDEN_SIZE = 64
+NUM_LAYERS = 2
+LEARNING_RATE = 0.001
+TARGET = 'Porosity'
+
+# Generate or load data
+df = generate_synthetic_well_log_data()
+
+# Feature columns
+features = ['GammaRay', 'Resistivity', 'Density', 'NeutronPorosity']
+X = df[features].values
+y = df[TARGET].values
+
+# Normalize features
+scaler = MinMaxScaler()
+X_scaled = scaler.fit_transform(X)
+
+# Convert data to sequences
+def create_sequences(X, y, seq_length):
+    Xs, ys = [], []
+    for i in range(len(X) - seq_length):
+        Xs.append(X[i:i+seq_length])
+        ys.append(y[i+seq_length])
+    return np.array(Xs), np.array(ys)
+
+X_seq, y_seq = create_sequences(X_scaled, y, SEQ_LENGTH)
+
+# Train/test split
+X_train, X_test, y_train, y_test = train_test_split(X_seq, y_seq, test_size=0.2, random_state=42)
+
+# Datasets and loaders
+train_dataset = WellLogDataset(X_train, y_train)
+test_dataset = WellLogDataset(X_test, y_test)
+
+train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
+
+# Model, Loss, Optimizer
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+model = LSTMModel(input_size=len(features), hidden_size=HIDDEN_SIZE, num_layers=NUM_LAYERS, output_size=1).to(device)
+criterion = nn.MSELoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+
+# Training Loop
+for epoch in range(EPOCHS):
+    model.train()
+    epoch_loss = 0
+    for X_batch, y_batch in train_loader:
+        X_batch, y_batch = X_batch.to(device), y_batch.to(device).unsqueeze(1)
+        
+        optimizer.zero_grad()
+        outputs = model(X_batch)
+        loss = criterion(outputs, y_batch)
+        loss.backward()
+        optimizer.step()
+        
+        epoch_loss += loss.item()
+    
+    print(f"Epoch {epoch+1}/{EPOCHS}, Loss: {epoch_loss/len(train_loader):.4f}")
+
+# Evaluation
+model.eval()
+predictions = []
+true_values = []
+
+with torch.no_grad():
+    for X_batch, y_batch in test_loader:
+        X_batch = X_batch.to(device)
+        outputs = model(X_batch).cpu().numpy()
+        predictions.append(outputs)
+        true_values.append(y_batch.numpy())
+
+predictions = np.vstack(predictions)
+true_values = np.vstack(true_values)
+
+mse = mean_squared_error(true_values, predictions)
+r2 = r2_score(true_values, predictions)
+print(f"Test MSE: {mse:.4f}")
+print(f"Test R² Score: {r2:.4f}")
+
+# Save model
+torch.save(model.state_dict(), "lstm_well_log_model.pth")
